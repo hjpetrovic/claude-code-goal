@@ -223,4 +223,4 @@ Validation: ${VALIDATION:-(declare complete when done)}
 
 Start immediately. After every action, append a one-line checkpoint to .claude/goal.json. When the stopping condition is met, set status=\"complete\" in .claude/goal.json."
 
-exec "$CLAUDE_BIN" --permission-mode bypassPermissions --print "$PROMPT" "${CLAUDE_EXTRA_FLAGS[@]}"
+exec "$CLAUDE_BIN" --permission-mode bypassPermissions --print "$PROMPT" ${CLAUDE_EXTRA_FLAGS[@]+"${CLAUDE_EXTRA_FLAGS[@]}"}
