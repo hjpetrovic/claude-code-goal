@@ -10,6 +10,8 @@ Codex's `/goal` attaches a durable objective to a thread; Codex then runs `plan 
 
 - A **skill** at `~/.claude/skills/goal/SKILL.md` defining `/goal` and its subcommands.
 - A **Stop hook** at `~/.claude/hooks/goal_continue.py` that fires after every Claude turn, reads `<project>/.claude/goal.json`, and either re-injects a continuation prompt or marks the goal complete.
+- A **`goal` CLI wrapper** (`bin/goal`) that pre-arms `goal.json` before invoking `claude --print`, making the loop work in non-interactive mode.
+- A **`goal-validate` helper** (`bin/goal-validate`) with richer stopping conditions than bare `test -f`.
 
 ## Install
 
@@ -37,6 +39,8 @@ Project-level `.claude/goal.json` files are left in place.
 
 ## Usage
 
+### Interactive mode (Claude Code terminal)
+
 In any project, after restarting Claude Code:
 
 ```
@@ -49,6 +53,47 @@ Claude will ask for:
 - Iteration and wall-clock budgets
 
 Then it writes `.claude/goal.json` and starts iterating. After every turn, the Stop hook decides whether to keep going.
+
+### Non-interactive / `--print` mode
+
+When calling `claude --print` (e.g. from scripts or orchestrators like OpenClaw), use the `goal` wrapper instead. It pre-arms `goal.json` before handing off to Claude, so the loop is engaged from the first turn:
+
+```bash
+goal "Migrate auth middleware — done when integration tests pass" \
+  --validation "pnpm test:integration" \
+  --no-change "src/legacy/**" \
+  --max-iterations 20
+```
+
+> **Why this matters:** in `--print` mode, `/goal` passed as a prompt string is treated as plain text — the SKILL.md slash-command logic never runs and `goal.json` is never written. The `goal` wrapper solves this by writing the state file directly.
+
+### Richer validation with `goal-validate`
+
+Instead of `test -f file.md` (just checks existence), use the `goal-validate` helper:
+
+```bash
+# All files exist
+goal-validate files chart_heavy_template.md narrative_template.md
+
+# Word count within budget
+goal-validate words narrative_template.md 400
+
+# Required sections present
+goal-validate sections narrative_template.md HOOK CHART
+
+# Chart marker count in range
+goal-validate charts chart_heavy_template.md 4 8
+
+# Compose with &&
+goal-validate files narrative.md && goal-validate words narrative.md 400
+```
+
+Pass any of these as `--validation` to `goal`:
+
+```bash
+goal "Write two Monday Data templates" \
+  --validation "goal-validate files chart_heavy_template.md narrative_template.md && goal-validate words narrative_template.md 400"
+```
 
 ### Subcommands
 
@@ -102,6 +147,8 @@ Every hook decision is logged to `<project>/.claude/goal.log` (rotated to last 1
 
 ## Limitations
 
+- **`/goal` in `--print` mode won't arm the loop** — use the `goal` CLI wrapper instead (see above). In `--print` mode, slash commands are plain text in the prompt; SKILL.md logic is never invoked.
+- **Single-turn tasks bypass iteration entirely** — the Stop hook fires once, sees the validation command pass immediately, and marks complete. The loop only adds value when a task genuinely requires multiple attempts to pass validation. Design your validation commands to be initially failing.
 - **POSIX-only**: uses `fcntl` for lock files; won't work on Windows without a port.
 - **One goal per project**: same as Codex.
 - **Zero-progress detection** depends on Claude Code's transcript JSONL format being stable.

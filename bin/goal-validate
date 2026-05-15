@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+goal-validate — richer validation helpers for use as validation_command in goal.json.
+
+These are composable checks designed to be more meaningful than bare `test -f` checks.
+Each subcommand exits 0 on pass, non-zero on fail, with a human-readable message.
+
+Usage:
+  goal-validate files <file1> [file2 ...]           all files exist
+  goal-validate contains <file> <pattern>            file contains regex pattern
+  goal-validate words <file> <max>                   file word count <= max
+  goal-validate words-range <file> <min> <max>       word count between min and max
+  goal-validate sections <file> <heading1> [...]     file contains all headings
+  goal-validate all <cmd1> && <cmd2>                 (use shell && for composition)
+
+Examples in goal.json:
+  "validation_command": "goal-validate files chart_heavy_template.md narrative_template.md"
+  "validation_command": "goal-validate words narrative_template.md 400 && goal-validate sections narrative_template.md 'HOOK' 'CHART'"
+  "validation_command": "pnpm test:integration && goal-validate files dist/index.js"
+"""
+import re
+import sys
+from pathlib import Path
+
+
+def fail(msg: str):
+    print(f"FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def ok(msg: str):
+    print(f"OK: {msg}")
+    sys.exit(0)
+
+
+def cmd_files(args):
+    if not args:
+        fail("files: no filenames given")
+    missing = [f for f in args if not Path(f).exists()]
+    if missing:
+        fail(f"missing files: {', '.join(missing)}")
+    ok(f"all {len(args)} file(s) exist")
+
+
+def cmd_contains(args):
+    if len(args) < 2:
+        fail("contains: usage: contains <file> <pattern>")
+    path, pattern = Path(args[0]), args[1]
+    if not path.exists():
+        fail(f"file not found: {path}")
+    text = path.read_text()
+    if not re.search(pattern, text, re.IGNORECASE):
+        fail(f"{path} does not contain pattern: {pattern!r}")
+    ok(f"{path} contains {pattern!r}")
+
+
+def cmd_words(args):
+    if len(args) < 2:
+        fail("words: usage: words <file> <max_words>")
+    path, max_w = Path(args[0]), int(args[1])
+    if not path.exists():
+        fail(f"file not found: {path}")
+    # strip markdown markers and count
+    text = path.read_text()
+    # exclude lines that are purely metadata/markers (e.g. [CHART: ...])
+    lines = [l for l in text.splitlines() if not re.match(r'^\[CHART:', l.strip())]
+    word_count = len(" ".join(lines).split())
+    if word_count > max_w:
+        fail(f"{path} has {word_count} words (limit: {max_w})")
+    ok(f"{path} word count {word_count} ≤ {max_w}")
+
+
+def cmd_words_range(args):
+    if len(args) < 3:
+        fail("words-range: usage: words-range <file> <min> <max>")
+    path, min_w, max_w = Path(args[0]), int(args[1]), int(args[2])
+    if not path.exists():
+        fail(f"file not found: {path}")
+    text = path.read_text()
+    lines = [l for l in text.splitlines() if not re.match(r'^\[CHART:', l.strip())]
+    word_count = len(" ".join(lines).split())
+    if word_count < min_w:
+        fail(f"{path} has {word_count} words (minimum: {min_w})")
+    if word_count > max_w:
+        fail(f"{path} has {word_count} words (maximum: {max_w})")
+    ok(f"{path} word count {word_count} in range [{min_w}, {max_w}]")
+
+
+def cmd_sections(args):
+    if len(args) < 2:
+        fail("sections: usage: sections <file> <heading1> [heading2 ...]")
+    path = Path(args[0])
+    headings = args[1:]
+    if not path.exists():
+        fail(f"file not found: {path}")
+    text = path.read_text()
+    missing = [h for h in headings if h.lower() not in text.lower()]
+    if missing:
+        fail(f"{path} missing required sections: {', '.join(missing)}")
+    ok(f"{path} contains all {len(headings)} required section(s)")
+
+
+def cmd_charts(args):
+    """Count [CHART: ...] markers in a file."""
+    if len(args) < 2:
+        fail("charts: usage: charts <file> <min> [max]")
+    path = Path(args[0])
+    min_c = int(args[1])
+    max_c = int(args[2]) if len(args) > 2 else 999
+    if not path.exists():
+        fail(f"file not found: {path}")
+    text = path.read_text()
+    count = len(re.findall(r'^\[CHART:', text, re.MULTILINE))
+    if count < min_c:
+        fail(f"{path} has {count} chart markers (minimum: {min_c})")
+    if count > max_c:
+        fail(f"{path} has {count} chart markers (maximum: {max_c})")
+    ok(f"{path} has {count} chart marker(s) in range [{min_c}, {max_c}]")
+
+
+COMMANDS = {
+    "files": cmd_files,
+    "contains": cmd_contains,
+    "words": cmd_words,
+    "words-range": cmd_words_range,
+    "sections": cmd_sections,
+    "charts": cmd_charts,
+}
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+    subcmd = args[0]
+    if subcmd not in COMMANDS:
+        print(f"Unknown subcommand: {subcmd!r}. Available: {', '.join(COMMANDS)}", file=sys.stderr)
+        sys.exit(1)
+    COMMANDS[subcmd](args[1:])
