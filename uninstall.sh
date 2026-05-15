@@ -50,5 +50,13 @@ else:
 PY
 fi
 
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+for bin_name in goal goal-validate; do
+  if [[ -f "$BIN_DIR/$bin_name" ]]; then
+    rm -f "$BIN_DIR/$bin_name"
+    echo "  - removed $BIN_DIR/$bin_name"
+  fi
+done
+
 echo
 echo "Done. Project-level .claude/goal.json files were NOT touched."

@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# goal — CLI wrapper that pre-arms goal.json before invoking Claude Code in --print mode.
+#
+# Problem: when Claude Code is called with --print, /goal is passed as plain text in the
+# prompt and the SKILL.md slash-command logic is never invoked. This means goal.json is
+# never written, and the Stop hook has nothing to iterate on.
+#
+# This wrapper solves it by writing goal.json directly before handing off to Claude,
+# so the loop is pre-armed even in --print / non-interactive mode.
+#
+# Usage:
+#   goal "Migrate auth middleware — done when integration tests pass" \
+#        [--validation "pnpm test:integration"] \
+#        [--max-iterations 20] \
+#        [--budget 3600] \
+#        [--no-change "src/legacy/**"] \
+#        [--ref "docs/migration.md"] \
+#        [-- <extra claude flags>]
+#
+#   goal --status        # show current goal status
+#   goal --pause         # pause the loop
+#   goal --resume        # resume the loop
+#   goal --complete      # mark done
+#   goal --clear         # delete goal.json
+#
+# Environment:
+#   CLAUDE_HOME   path to .claude dir (default: ~/.claude)
+#   CLAUDE_BIN    path to claude binary (default: claude)
+
+set -euo pipefail
+
+CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+GOAL_DIR=".claude"
+GOAL_FILE="$GOAL_DIR/goal.json"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+require_goal() {
+  if [[ ! -f "$GOAL_FILE" ]]; then
+    echo "No goal set in $(pwd)/$GOAL_FILE" >&2
+    exit 1
+  fi
+}
+
+new_uuid() {
+  python3 -c "import uuid; print(uuid.uuid4())"
+}
+
+now_iso() {
+  python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat())"
+}
+
+write_goal() {
+  local objective="$1"
+  local stopping_condition="$2"
+  local validation_command="$3"
+  local do_not_change="$4"   # JSON array string, e.g. '["src/legacy/**"]'
+  local reference_files="$5" # JSON array string
+  local max_iterations="$6"
+  local max_wall_clock="$7"
+
+  mkdir -p "$GOAL_DIR"
+  python3 - <<PY
+import json, uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+p = Path("$GOAL_FILE")
+now = datetime.now(timezone.utc).isoformat()
+
+state = {
+    "goal_id": str(uuid.uuid4()),
+    "objective": """$objective""",
+    "stopping_condition": """$stopping_condition""",
+    "validation_command": """$validation_command""" or None,
+    "do_not_change": json.loads("""$do_not_change"""),
+    "reference_files": json.loads("""$reference_files"""),
+    "status": "active",
+    "created_at": now,
+    "started_at": now,
+    "ended_at": None,
+    "iterations_used": 0,
+    "max_iterations": int("$max_iterations"),
+    "max_wall_clock_seconds": int("$max_wall_clock"),
+    "zero_progress_streak": 0,
+    "checkpoints": []
+}
+
+tmp = p.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(state, indent=2))
+tmp.replace(p)
+print(f"Goal written to {p}")
+PY
+}
+
+patch_status() {
+  local new_status="$1"
+  require_goal
+  python3 - <<PY
+import json
+from pathlib import Path
+from datetime import datetime, timezone
+
+p = Path("$GOAL_FILE")
+s = json.loads(p.read_text())
+s["status"] = "$new_status"
+terminal = {"complete", "budget_limited"}
+if "$new_status" in terminal:
+    s["ended_at"] = datetime.now(timezone.utc).isoformat()
+tmp = p.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(s, indent=2))
+tmp.replace(p)
+print(f"Goal status → $new_status")
+PY
+}
+
+show_status() {
+  require_goal
+  python3 - <<PY
+import json
+from pathlib import Path
+from datetime import datetime, timezone
+
+s = json.loads(Path("$GOAL_FILE").read_text())
+started = s.get("started_at","")
+elapsed = ""
+if started:
+    try:
+        t = datetime.fromisoformat(started.replace("Z","+00:00"))
+        elapsed = f"{int((datetime.now(timezone.utc)-t).total_seconds())}s"
+    except Exception:
+        pass
+
+print(f"Goal:       {s.get('objective','?')}")
+print(f"Status:     {s.get('status','?')}")
+print(f"Iterations: {s.get('iterations_used',0)}/{s.get('max_iterations',50)}")
+print(f"Elapsed:    {elapsed} / {s.get('max_wall_clock_seconds',7200)}s budget")
+cps = s.get("checkpoints",[])[-3:]
+if cps:
+    print("Checkpoints (last 3):")
+    for c in cps:
+        print(f"  {c.get('at','?')[:19]}  {c.get('summary','?')}")
+PY
+}
+
+# ── subcommand dispatch ───────────────────────────────────────────────────────
+
+if [[ $# -eq 0 ]]; then
+  show_status
+  exit 0
+fi
+
+case "$1" in
+  --status)  show_status; exit 0 ;;
+  --pause)   patch_status paused; exit 0 ;;
+  --resume)  patch_status active; exit 0 ;;
+  --complete) patch_status complete; exit 0 ;;
+  --clear)
+    require_goal
+    read -r -p "Delete $(pwd)/$GOAL_FILE? [y/N] " yn
+    [[ "$yn" =~ ^[Yy]$ ]] && rm "$GOAL_FILE" && echo "Goal cleared." || echo "Aborted."
+    exit 0
+    ;;
+  --help|-h)
+    sed -n '/^# goal/,/^[^#]/p' "$0" | head -30
+    exit 0
+    ;;
+esac
+
+# ── set a new goal ────────────────────────────────────────────────────────────
+
+OBJECTIVE=""
+STOPPING=""
+VALIDATION=""
+DO_NOT_CHANGE="[]"
+REFERENCE_FILES="[]"
+MAX_ITER=50
+MAX_WALL=7200
+CLAUDE_EXTRA_FLAGS=()
+
+# first positional arg is the objective
+OBJECTIVE="$1"
+shift
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stopping)      STOPPING="$2";    shift 2 ;;
+    --validation)    VALIDATION="$2";  shift 2 ;;
+    --no-change)
+      # append to JSON array
+      DO_NOT_CHANGE=$(python3 -c "import json,sys; a=json.loads('$DO_NOT_CHANGE'); a.append('$2'); print(json.dumps(a))")
+      shift 2 ;;
+    --ref)
+      REFERENCE_FILES=$(python3 -c "import json,sys; a=json.loads('$REFERENCE_FILES'); a.append('$2'); print(json.dumps(a))")
+      shift 2 ;;
+    --max-iterations) MAX_ITER="$2"; shift 2 ;;
+    --budget)         MAX_WALL="$2"; shift 2 ;;
+    --)               shift; CLAUDE_EXTRA_FLAGS+=("$@"); break ;;
+    *)                CLAUDE_EXTRA_FLAGS+=("$1"); shift ;;
+  esac
+done
+
+# if stopping condition not provided separately, use objective as both
+[[ -z "$STOPPING" ]] && STOPPING="$OBJECTIVE"
+
+write_goal "$OBJECTIVE" "$STOPPING" "$VALIDATION" "$DO_NOT_CHANGE" "$REFERENCE_FILES" "$MAX_ITER" "$MAX_WALL"
+
+echo ""
+echo "Starting Claude Code goal loop..."
+echo "  Objective:  $OBJECTIVE"
+echo "  Validation: ${VALIDATION:-(model-declared)}"
+echo "  Budget:     $MAX_ITER iterations / ${MAX_WALL}s"
+echo ""
+
+# Build the continuation prompt to inject into --print mode.
+# This tells Claude to read goal.json and begin iterating.
+PROMPT="A goal has been pre-armed in .claude/goal.json. Read it now, then begin the plan → act → verify → iterate cycle.
+
+Objective: $OBJECTIVE
+Stopping condition: $STOPPING
+Validation: ${VALIDATION:-(declare complete when done)}
+
+Start immediately. After every action, append a one-line checkpoint to .claude/goal.json. When the stopping condition is met, set status=\"complete\" in .claude/goal.json."
+
+exec "$CLAUDE_BIN" --permission-mode bypassPermissions --print "$PROMPT" ${CLAUDE_EXTRA_FLAGS[@]+"${CLAUDE_EXTRA_FLAGS[@]}"}

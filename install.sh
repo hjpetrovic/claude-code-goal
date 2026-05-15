@@ -12,12 +12,16 @@
 #   3. Patches $CLAUDE_HOME/settings.json to register the Stop hook
 #      (creates the file or merges into existing hooks.Stop without clobbering)
 #   4. Backs up settings.json before patching
+#   5. Installs bin/goal and bin/goal-validate to /usr/local/bin (or $BIN_DIR)
 
 set -euo pipefail
 
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Default to ~/.local/bin (no sudo needed); override with BIN_DIR=/usr/local/bin ./install.sh
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+mkdir -p "$BIN_DIR"
 echo ">> Installing /goal into $CLAUDE_HOME"
 
 # 1. Skills
@@ -72,6 +76,27 @@ else:
     print(f"  - registered Stop hook in {settings_path}")
 PY
 
+# 4. CLI wrappers (goal + goal-validate)
+if [[ -d "$SCRIPT_DIR/bin" ]]; then
+  for bin_file in "$SCRIPT_DIR/bin"/*; do
+    name="$(basename "$bin_file")"
+    dest="$BIN_DIR/$name"
+    cp "$bin_file" "$dest"
+    chmod +x "$dest"
+    echo "  - installed $dest"
+  done
+fi
+
 echo
 echo "Done. Restart Claude Code for the hook to activate."
-echo "Then in any project: /goal <your objective>"
+echo ""
+echo "Interactive use (Claude Code terminal):"
+echo "  /goal <your objective>"
+echo ""
+echo "Non-interactive / --print mode:"
+echo "  goal \"your objective\" --validation \"your-check-command\""
+echo ""
+echo "Richer validation:"
+echo "  goal-validate files a.md b.md"
+echo "  goal-validate words narrative.md 400"
+echo "  goal-validate sections narrative.md HOOK CHART"
