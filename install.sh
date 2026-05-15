@@ -19,7 +19,9 @@ set -euo pipefail
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+# Default to ~/.local/bin (no sudo needed); override with BIN_DIR=/usr/local/bin ./install.sh
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+mkdir -p "$BIN_DIR"
 echo ">> Installing /goal into $CLAUDE_HOME"
 
 # 1. Skills
